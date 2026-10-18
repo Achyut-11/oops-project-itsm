@@ -1,7 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import psycopg
-from config import dbpassword
+from config import dbpassword, getConnection
+from typing import Literal
 
 app = FastAPI(title="ITSM SYSTEM")
 
@@ -10,6 +11,17 @@ class incidentCreate(BaseModel):
     description:str
     category:str
 
+class IncidentStatusUpdate(BaseModel):
+    status: Literal[
+         "NEW",
+         "CLASSIFIED",
+         "ASSIGNED",
+         "ACKNOWLEDGED",
+         "IN_PROGRESS",
+         "RESOLVED",
+         "VERIFIED",
+         "CLOSED"
+        ]
 
 
 incidents = []
@@ -24,13 +36,7 @@ def home():
 
 @app.get("/incidents")
 def get_inci():
-    with psycopg.connect(
-        host = "localhost",
-        port=5432,
-        dbname="itsm_database",
-        user="postgres",
-        password=dbpassword
-        )as con:  
+    with getConnection() as con:  
             with con.cursor() as cur:
                 cur.execute(
                     """
@@ -39,7 +45,7 @@ def get_inci():
   
                     """
                 )
-            rows = cur.fetchall()
+                rows = cur.fetchall()
 
             incidents=[]
 
@@ -58,13 +64,7 @@ def get_inci():
 @app.get("/incidents/{incident_id}")
 def get_incident_byid(incident_id: int):
 
-    with psycopg.connect(
-            host = "localhost",
-            port=5432,
-            dbname="itsm_database",
-            user="postgres",
-            password=dbpassword
-            )as con:  
+    with getConnection() as con:  
                 with con.cursor() as cur:
                     cur.execute(
                         """
@@ -75,7 +75,7 @@ def get_incident_byid(incident_id: int):
                         """,
                         (incident_id,)
                     )
-                row = cur.fetchone()
+                    row = cur.fetchone()
 
 
                 if row is None:
@@ -97,13 +97,7 @@ def get_incident_byid(incident_id: int):
 
 @app.post("/incidents")
 def create_incident(incident_data:incidentCreate):
-    with psycopg.connect(
-        host = "localhost",
-        port=5432,
-        dbname="itsm_database",
-        user="postgres",
-        password=dbpassword
-    )as con:
+    with getConnection() as con:
         with con.cursor() as cur:
             cur.execute(
                 """
@@ -131,3 +125,37 @@ def create_incident(incident_data:incidentCreate):
 
     return incident
 
+
+
+
+@app.patch("/incidents/{incident_id}")
+def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE incidents
+                SET status = %s
+                WHERE id = %s
+                RETURNING id, title, description, category, status;
+                """,
+                (status_data.status, incident_id)
+            )
+
+            row = cur.fetchone()
+
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Incident not found"
+                )
+
+            incident = {
+                "id": row[0],
+                "title": row[1],
+                "description": row[2],
+                "category": row[3],
+                "status": row[4]
+            }
+
+    return incident
