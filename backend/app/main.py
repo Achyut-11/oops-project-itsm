@@ -26,6 +26,12 @@ class IncidentStatusUpdate(BaseModel):
          "VERIFIED",
          "CLOSED"
         ]
+class UserCreate(BaseModel):
+    name:str
+    email:str
+    role: Literal["EMPLOYEE", "TECHNICIAN", "ADMIN"]
+
+
 
 
 allowed_transitions = {
@@ -221,3 +227,93 @@ def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
             }
 
     return incident
+
+
+
+@app.get("/users")
+def getallusers():
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name, email, role, is_active, created_at
+                FROM users
+                """
+            )
+            rows = cur.fetchall()
+    people =[]
+
+    for row in rows:
+        person = {
+            "id" : row[0],
+            "name" : row[1],
+            "email" : row[2],
+            "role" : row[3],
+            "is_active" : row[4],
+            "created_at" : row[5]
+        }
+        people.append(person)
+
+    return people
+
+@app.get("/users/{user_id}")
+def getoneusers(user_id):
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name, email, role, is_active, created_at
+                FROM users
+                WHERE id = %s;
+                """,
+                (user_id,)
+            )
+            row = cur.fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="user not found"
+        )
+
+    person = {
+        "id" : row[0],
+        "name" : row[1],
+        "email" : row[2],
+        "role" : row[3],
+        "is_active" : row[4],
+        "created_at" : row[5]
+    }
+    
+
+    return person
+
+@app.post("/users")
+def adduser(userinfo: UserCreate):
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (name, email, role)
+                VALUES (%s,%s,%s)
+                RETURNING id, name, email, role, is_active, created_at;
+                """,(
+
+                    userinfo.name,
+                    userinfo.email,
+                    userinfo.role
+
+                )
+            )
+            row = cur.fetchone()
+
+    person = {
+        "id" : row[0],
+        "name" : row[1],
+        "email" : row[2],
+        "role" : row[3],
+        "is_active" : row[4],
+        "created_at" : row[5]
+    }
+        
+
+    return person
