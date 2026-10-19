@@ -33,6 +33,8 @@ class UserCreate(BaseModel):
     name:str
     email:str
     role: Literal["EMPLOYEE", "TECHNICIAN", "ADMIN"]
+    years_of_experience: int
+    skills: list[str] = []
 
 
 
@@ -285,8 +287,16 @@ def getallusers():
         with con.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, name, email, role, is_active, created_at
-                FROM users
+                SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at, u.years_of_experience,
+                COALESCE(
+                    ARRAY_AGG(ts.skill) FILTER (WHERE ts.skill IS NOT NULL),
+                    ARRAY[]::VARCHAR[]
+                ) AS skills
+                FROM users u
+                LEFT JOIN technician_skills ts
+                    on u.id = ts.technician_id
+                GROUP BY u.id
+                ORDER BY u.id
                 """
             )
             rows = cur.fetchall()
@@ -299,21 +309,32 @@ def getallusers():
             "email" : row[2],
             "role" : row[3],
             "is_active" : row[4],
-            "created_at" : row[5]
+            "created_at" : row[5],
+            "years_of_experience": row[6],
+            "skills":row[7]
         }
         people.append(person)
 
     return people
 
 @app.get("/users/{user_id}")
-def getoneusers(user_id):
+def getoneuser(user_id):
     with getConnection() as con:
         with con.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, name, email, role, is_active, created_at
-                FROM users
-                WHERE id = %s;
+                SELECT u.id, u.name, u.email, u.role, u.is_active, u.created_at, u.years_of_experience,
+                COALESCE(
+                    ARRAY_AGG(ts.skill) FILTER (WHERE ts.skill IS NOT NULL),
+                    ARRAY[]::VARCHAR[]
+                ) AS skills
+                FROM users u
+                LEFT JOIN technician_skills ts
+                    on u.id = ts.technician_id
+                WHERE u.id = %s
+                GROUP BY u.id
+                ORDER BY u.id;
+                
                 """,
                 (user_id,)
             )
@@ -330,7 +351,9 @@ def getoneusers(user_id):
         "email" : row[2],
         "role" : row[3],
         "is_active" : row[4],
-        "created_at" : row[5]
+        "created_at" : row[5],
+        "years_of_experience": row[6],
+        "skills" : row[7]
     }
     
 
@@ -342,18 +365,41 @@ def adduser(userinfo: UserCreate):
         with con.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO users (name, email, role)
-                VALUES (%s,%s,%s)
-                RETURNING id, name, email, role, is_active, created_at;
+                INSERT INTO users (name, email, role, years_of_experience)
+                VALUES (%s,%s,%s, %s)
+                RETURNING id, name, email, role, is_active, created_at, years_of_experience;
                 """,(
 
                     userinfo.name,
                     userinfo.email,
-                    userinfo.role
+                    userinfo.role,
+                    userinfo.years_of_experience
 
                 ) 
             )
             row = cur.fetchone()
+
+            user_id = row[0]
+
+            if(userinfo.role == "TECHNICIAN"):
+                for skill in userinfo.skills:
+                    cur.execute(
+                        """
+                        INSERT INTO technician_skills (technician_id, skill)
+                        VALUES (%s, %s)
+                        """,(
+                            user_id, skill
+                        )
+                    )
+
+            cur.execute(
+                            """
+                            SELECT skill
+                            FROM technician_skills
+                            WHERE technician_id = %s
+                            """,(user_id,)
+                        )
+            skills = [row[0] for row in cur.fetchall()]
 
     person = {
         "id" : row[0],
@@ -361,7 +407,9 @@ def adduser(userinfo: UserCreate):
         "email" : row[2],
         "role" : row[3],
         "is_active" : row[4],
-        "created_at" : row[5]
+        "created_at" : row[5],
+        "years_of_experience" : row[6],
+        "skills": skills
     }
         
 
