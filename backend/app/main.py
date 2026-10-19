@@ -3,10 +3,11 @@ from pydantic import BaseModel, Field
 from app.config import getConnection
 from typing import Literal
 from app.services.priority_calc import priority_calc
+from app.services.load_based_assignment import load_based_assignment
 
 app = FastAPI(title="ITSM SYSTEM")
 
-class incidentCreate(BaseModel):
+class IncidentCreate(BaseModel):
     title:str
     description:str
     category:str
@@ -14,6 +15,8 @@ class incidentCreate(BaseModel):
     estimated_complexity: Literal["LOW", "MEDIUM", "HIGH"]
     business_criticality: Literal["LOW", "MEDIUM", "HIGH"]
     affected_percentage: float = Field(ge=0, le=100)
+
+    reported_by_user_id : int
 
 class IncidentStatusUpdate(BaseModel):
     status: Literal[
@@ -35,8 +38,7 @@ class UserCreate(BaseModel):
 
 
 allowed_transitions = {
-    "NEW": ["CLASSIFIED"],
-    "CLASSIFIED": ["ASSIGNED"],
+    "NEW": ["ASSIGNED"],
     "ASSIGNED": ["ACKNOWLEDGED"],
     "ACKNOWLEDGED": ["IN_PROGRESS"],
     "IN_PROGRESS": ["RESOLVED"],
@@ -58,7 +60,7 @@ def get_inci():
             with con.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority
+                    SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority, reported_by_user_id, assigned_technician_id
                     FROM incidents 
   
                     """
@@ -77,7 +79,9 @@ def get_inci():
                     "estimated_complexity": row[5],
                     "business_criticality": row[6],
                     "affected_percentage": float(row[7]),
-                    "priority":row[8]
+                    "priority":row[8],
+                    "reported_by_user_id":row[9],
+                    "assigned_technician_id":row[10]
                 }
                 incidents.append(incident)
 
@@ -90,7 +94,7 @@ def get_incident_byid(incident_id: int):
                 with con.cursor() as cur:
                     cur.execute(
                         """
-                        SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority
+                        SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id
                         FROM incidents 
                         WHERE id = %s;
       
@@ -116,13 +120,15 @@ def get_incident_byid(incident_id: int):
                     "estimated_complexity": row[5],
                     "business_criticality": row[6],
                     "affected_percentage": float(row[7]),
-                    "priority":row[8]
+                    "priority":row[8],
+                    "reported_by_user_id":row[9],
+                    "assigned_technician_id":row[10]
                 }
     return incident
         
 
 @app.post("/incidents")
-def create_incident(incident_data:incidentCreate):
+def create_incident(incident_data:IncidentCreate):
 
     priority = priority_calc(
     incident_data.affected_percentage,
@@ -130,14 +136,41 @@ def create_incident(incident_data:incidentCreate):
     incident_data.estimated_complexity
     )
 
+    
+
     with getConnection() as con:
         with con.cursor() as cur:
+            assigned_technician_id = load_based_assignment(cur)
             cur.execute(
                 """
-                INSERT INTO incidents (title, description, category, estimated_complexity, business_criticality, affected_percentage, priority)
-                VALUES (%s, %s, %s,%s, %s, %s, %s)
-                RETURNING id, title, description, category, status, estimated_complexity, business_criticality, affected_percentage, priority;
+                SELECT id, role 
+                FROM users
+                WHERE id =%s
+                """,
+                (incident_data.reported_by_user_id,)
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="User not found"
+                )
 
+            if row[1] != "EMPLOYEE":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Only employees can report incidents"
+                )
+
+
+
+
+
+            cur.execute(
+                """
+                INSERT INTO incidents (title, description, category, estimated_complexity, business_criticality, affected_percentage, priority,reported_by_user_id,assigned_technician_id)
+                VALUES (%s, %s, %s,%s, %s, %s, %s, %s, %s)
+                RETURNING id, title, description, category, status,estimated_complexity, business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id;
                 """,
                 (
                     incident_data.title,
@@ -146,9 +179,21 @@ def create_incident(incident_data:incidentCreate):
                     incident_data.estimated_complexity,
                     incident_data.business_criticality,
                     incident_data.affected_percentage,
-                    priority
+                    priority,
+                    incident_data.reported_by_user_id,
+                    assigned_technician_id
                 )
             )
+
+            row = cur.fetchone()
+    
+            cur.execute("""
+                UPDATE incidents
+                SET status = %s
+                WHERE id = %s
+                RETURNING id, title, description, category, status,estimated_complexity, business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id;
+                """, ("ASSIGNED", row[0]))
+
 
             row = cur.fetchone()
 
@@ -161,7 +206,9 @@ def create_incident(incident_data:incidentCreate):
             "estimated_complexity": row[5],
             "business_criticality": row[6],
             "affected_percentage": float(row[7]),
-            "priority":row[8]
+            "priority":row[8],
+            "reported_by_user_id":row[9],
+            "assigned_technician_id":row[10]
         }
 
     return incident
@@ -205,7 +252,7 @@ def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
                 UPDATE incidents
                 SET status = %s
                 WHERE id = %s
-                RETURNING id, title, description, category, status, estimated_complexity, business_criticality, affected_percentage, priority;
+                RETURNING id, title, description, category, status, estimated_complexity, business_criticality, affected_percentage, priority,reported_by_user_id,assigned_technician_id;
                 """,
                 (status_data.status, incident_id)
             )
@@ -223,7 +270,9 @@ def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
                 "estimated_complexity": row[5],
                 "business_criticality": row[6],
                 "affected_percentage": float(row[7]),
-                "priority":row[8]
+                "priority":row[8],
+                "reported_by_user_id":row[9],
+                "assigned_technician_id":row[10]
             }
 
     return incident
@@ -302,7 +351,7 @@ def adduser(userinfo: UserCreate):
                     userinfo.email,
                     userinfo.role
 
-                )
+                ) 
             )
             row = cur.fetchone()
 
@@ -317,3 +366,4 @@ def adduser(userinfo: UserCreate):
         
 
     return person
+
