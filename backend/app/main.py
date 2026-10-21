@@ -4,6 +4,7 @@ from app.config import getConnection
 from typing import Literal
 from app.services.priority_calc import priority_calc
 from app.services.load_based_assignment import load_based_assignment
+from app.services.int_tech_assignment import int_tech_assignment
 
 app = FastAPI(title="ITSM SYSTEM")
 
@@ -142,7 +143,7 @@ def create_incident(incident_data:IncidentCreate):
 
     with getConnection() as con:
         with con.cursor() as cur:
-            assigned_technician_id = load_based_assignment(cur)
+            
             cur.execute(
                 """
                 SELECT id, role 
@@ -170,9 +171,9 @@ def create_incident(incident_data:IncidentCreate):
 
             cur.execute(
                 """
-                INSERT INTO incidents (title, description, category, estimated_complexity, business_criticality, affected_percentage, priority,reported_by_user_id,assigned_technician_id)
-                VALUES (%s, %s, %s,%s, %s, %s, %s, %s, %s)
-                RETURNING id, title, description, category, status,estimated_complexity, business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id;
+                INSERT INTO incidents (title, description, category, estimated_complexity, business_criticality, affected_percentage, priority,reported_by_user_id)
+                VALUES (%s, %s, %s,%s, %s, %s, %s, %s)
+                RETURNING id, title, description, category, status,estimated_complexity, business_criticality,affected_percentage, priority,reported_by_user_id;
                 """,
                 (
                     incident_data.title,
@@ -183,18 +184,27 @@ def create_incident(incident_data:IncidentCreate):
                     incident_data.affected_percentage,
                     priority,
                     incident_data.reported_by_user_id,
-                    assigned_technician_id
+                    
                 )
             )
+            
 
             row = cur.fetchone()
+            incident_id = row[0]
+            assigned_technician_id = int_tech_assignment(cur, incident_id)
+
+            if assigned_technician_id is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="No suitable technician is currently available"
+                )
     
             cur.execute("""
                 UPDATE incidents
-                SET status = %s
+                SET status = %s, assigned_technician_id = %s
                 WHERE id = %s
                 RETURNING id, title, description, category, status,estimated_complexity, business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id;
-                """, ("ASSIGNED", row[0]))
+                """, ("ASSIGNED", assigned_technician_id, row[0]))
 
 
             row = cur.fetchone()
