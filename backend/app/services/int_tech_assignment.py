@@ -39,11 +39,39 @@ def int_tech_assignment(cur, incident_id):
     eligible_techs = []
 
     for row in row2:
+
+        if row[1] is None:
+            continue
         
         experiencescore = min(row[1]*10, 100)
 
         if experiencescore >=minimum_scores[row1[1]]:
             eligible_techs.append(row[0])
+
+
+    if not eligible_techs:
+            cur.execute(
+                """
+                SELECT u.id
+                FROM users u
+                JOIN technician_skills ts
+                    on u.id = ts.technician_id
+                WHERE u.role = 'TECHNICIAN'
+                AND u.is_active = TRUE
+                AND ts.skill = %s
+                AND u.years_of_experience IS NOT NULL
+                ORDER BY u.years_of_experience DESC , u.id ASC
+                LIMIT 1;
+                """,(row1[0],)
+            )
+    
+            fallback_tech = cur.fetchone()
+
+            if fallback_tech is None:
+                return None
+
+            return fallback_tech[0]
+    
 
     cur.execute(
         """
@@ -62,6 +90,9 @@ def int_tech_assignment(cur, incident_id):
 
     assigned_tech = cur.fetchone()
 
+    if assigned_tech is None:
+        return None
+    
     return assigned_tech[0]
 
 
