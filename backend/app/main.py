@@ -2,10 +2,12 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from app.config import getConnection
 from typing import Literal
+from datetime import datetime
 from app.services.priority_calc import priority_calc
 from app.services.load_based_assignment import load_based_assignment
 from app.services.int_tech_assignment import int_tech_assignment
 from app.services.audit_service import log_audit, getlogs
+from app.services.sla_service import calc_sla
 
 app = FastAPI(title="ITSM SYSTEM")
 
@@ -64,7 +66,7 @@ def get_inci():
             with con.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority, reported_by_user_id, assigned_technician_id
+                    SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority, reported_by_user_id, assigned_technician_id,response_deadline, resolution_deadline
                     FROM incidents 
   
                     """
@@ -85,7 +87,10 @@ def get_inci():
                     "affected_percentage": float(row[7]),
                     "priority":row[8],
                     "reported_by_user_id":row[9],
-                    "assigned_technician_id":row[10]
+                    "assigned_technician_id":row[10],
+                    "response_deadline":row[11],
+                    "resolution_deadline": row[12]
+                    
                 }
                 incidents.append(incident)
 
@@ -98,7 +103,7 @@ def get_incident_byid(incident_id: int):
                 with con.cursor() as cur:
                     cur.execute(
                         """
-                        SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id
+                        SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id, response_deadline, resolution_deadline
                         FROM incidents 
                         WHERE id = %s;
       
@@ -126,7 +131,9 @@ def get_incident_byid(incident_id: int):
                     "affected_percentage": float(row[7]),
                     "priority":row[8],
                     "reported_by_user_id":row[9],
-                    "assigned_technician_id":row[10]
+                    "assigned_technician_id":row[10],
+                    "response_deadline":row[11],
+                    "resolution_deadline":row[12]
                 }
     return incident
         
@@ -138,6 +145,13 @@ def create_incident(incident_data:IncidentCreate):
     incident_data.affected_percentage,
     incident_data.business_criticality,
     incident_data.estimated_complexity
+    )
+
+    created_at = datetime.now()
+
+    response_deadline, resolution_deadline = calc_sla(
+        priority,
+        created_at
     )
 
     
@@ -173,9 +187,9 @@ def create_incident(incident_data:IncidentCreate):
 
             cur.execute(
                 """
-                INSERT INTO incidents (title, description, category, estimated_complexity, business_criticality, affected_percentage, priority,reported_by_user_id)
-                VALUES (%s, %s, %s,%s, %s, %s, %s, %s)
-                RETURNING id, title, description, category, status,estimated_complexity, business_criticality,affected_percentage, priority,reported_by_user_id;
+                INSERT INTO incidents (title, description, category, estimated_complexity, business_criticality, affected_percentage, priority,reported_by_user_id, response_deadline, resolution_deadline)
+                VALUES (%s, %s, %s,%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, title, description, category, status,estimated_complexity, business_criticality,affected_percentage, priority,reported_by_user_id,response_deadline, resolution_deadline;
                 """,
                 (
                     incident_data.title,
@@ -186,6 +200,8 @@ def create_incident(incident_data:IncidentCreate):
                     incident_data.affected_percentage,
                     priority,
                     incident_data.reported_by_user_id,
+                    response_deadline, 
+                    resolution_deadline
                     
                 )
             )
@@ -223,11 +239,12 @@ def create_incident(incident_data:IncidentCreate):
                 UPDATE incidents
                 SET status = %s, assigned_technician_id = %s
                 WHERE id = %s
-                RETURNING id, title, description, category, status,estimated_complexity, business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id;
+                RETURNING id, title, description, category, status,estimated_complexity, business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id,response_deadline, resolution_deadline;
                 """, ("ASSIGNED", assigned_technician_id, row[0]))
-            print("5. Updated incident fetched:", row)
+           
 
             row = cur.fetchone()
+            print("5. Updated incident fetched:", row)
 
 
             log_audit(
@@ -253,7 +270,9 @@ def create_incident(incident_data:IncidentCreate):
             "affected_percentage": float(row[7]),
             "priority":row[8],
             "reported_by_user_id":row[9],
-            "assigned_technician_id":row[10]
+            "assigned_technician_id":row[10],
+            "response_deadline":row[11],
+            "resolution_deadline":row[12]
         }
 
     return incident
@@ -297,7 +316,7 @@ def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
                 UPDATE incidents
                 SET status = %s
                 WHERE id = %s
-                RETURNING id, title, description, category, status, estimated_complexity, business_criticality, affected_percentage, priority,reported_by_user_id,assigned_technician_id;
+                RETURNING id, title, description, category, status, estimated_complexity, business_criticality, affected_percentage, priority,reported_by_user_id,assigned_technician_id, response_deadline, resolution_deadline;
                 """,
                 (status_data.status, incident_id)
             )
@@ -317,7 +336,9 @@ def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
                 "affected_percentage": float(row[7]),
                 "priority":row[8],
                 "reported_by_user_id":row[9],
-                "assigned_technician_id":row[10]
+                "assigned_technician_id":row[10],
+                "response_deadline":row[11],
+                "resolution_deadline":row[12]
             }
 
     return incident
@@ -459,7 +480,7 @@ def adduser(userinfo: UserCreate):
     return person
 
 @app.get("/incidents/{incident_id}/audit")
-def log(incident_id : int):
+def gelog(incident_id : int):
     with getConnection() as con:
         with con.cursor() as cur:
             return getlogs(cur, incident_id)
