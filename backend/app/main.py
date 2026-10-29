@@ -5,6 +5,7 @@ from typing import Literal
 from app.services.priority_calc import priority_calc
 from app.services.load_based_assignment import load_based_assignment
 from app.services.int_tech_assignment import int_tech_assignment
+from app.services.audit_service import log_audit, getlogs
 
 app = FastAPI(title="ITSM SYSTEM")
 
@@ -153,6 +154,7 @@ def create_incident(incident_data:IncidentCreate):
                 (incident_data.reported_by_user_id,)
             )
             row = cur.fetchone()
+            print("1. User fetched")
             if row is None:
                 raise HTTPException(
                     status_code=404,
@@ -190,7 +192,21 @@ def create_incident(incident_data:IncidentCreate):
             
 
             row = cur.fetchone()
+            
+            print("2. Incident fetched:", row)
             incident_id = row[0]
+
+            log_audit(
+            cur,
+            incident_id,
+            incident_data.reported_by_user_id,
+            "INCIDENT_CREATED",
+            None,
+            "NEW"
+        )
+            
+            print("3. Creation audit logged")
+
             assigned_technician_id = int_tech_assignment(cur, incident_id)
 
             if assigned_technician_id is None:
@@ -198,6 +214,10 @@ def create_incident(incident_data:IncidentCreate):
                     status_code=503,
                     detail="No suitable technician is currently available"
                 )
+
+            print("4. Technician assigned:", assigned_technician_id)
+
+           
     
             cur.execute("""
                 UPDATE incidents
@@ -205,9 +225,22 @@ def create_incident(incident_data:IncidentCreate):
                 WHERE id = %s
                 RETURNING id, title, description, category, status,estimated_complexity, business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id;
                 """, ("ASSIGNED", assigned_technician_id, row[0]))
-
+            print("5. Updated incident fetched:", row)
 
             row = cur.fetchone()
+
+
+            log_audit(
+                    cur,
+                    incident_id,
+                    None, 
+                    "TECHNICIAN_ASSIGNED",
+                    None,
+                    str(assigned_technician_id)
+                )
+
+
+            
 
             incident = {
             "id": row[0],
@@ -425,3 +458,8 @@ def adduser(userinfo: UserCreate):
 
     return person
 
+@app.get("/incidents/{incident_id}/audit")
+def log(incident_id : int):
+    with getConnection() as con:
+        with con.cursor() as cur:
+            return getlogs(cur, incident_id)
