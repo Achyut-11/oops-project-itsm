@@ -68,7 +68,16 @@ def int_tech_assignment(cur, incident_id):
             fallback_tech = cur.fetchone()
 
             if fallback_tech is None:
-                return None
+                cur.execute(
+                    """
+                    SELECT id FROM users
+                    WHERE role = 'TECHNICIAN' AND is_active = TRUE
+                    ORDER BY years_of_experience DESC NULLS LAST, id ASC
+                    LIMIT 1;
+                    """
+                )
+                assigned_tech = cur.fetchone()
+                return assigned_tech[0] if assigned_tech else None
 
             return fallback_tech[0]
     
@@ -89,11 +98,8 @@ def int_tech_assignment(cur, incident_id):
     )
 
     assigned_tech = cur.fetchone()
-
-    if assigned_tech is None:
-        return None
     
-    return assigned_tech[0]
+    return assigned_tech[0] if assigned_tech else None
 
 
 

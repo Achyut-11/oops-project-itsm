@@ -40,7 +40,9 @@ class UserCreate(BaseModel):
     years_of_experience: int
     skills: list[str] = []
 
-
+class IncidentAssignmentUpdate(BaseModel):
+    technician_id: int
+    admin_id: int
 
 
 allowed_transitions = {
@@ -484,3 +486,107 @@ def gelog(incident_id : int):
     with getConnection() as con:
         with con.cursor() as cur:
             return getlogs(cur, incident_id)
+        
+@app.patch("/incidents/{incident_id}/assign")
+def admin_assign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
+    with getConnection() as con:
+        with con.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT id
+                FROM users
+                WHERE id = %s
+                    AND role = 'ADMIN'
+                    AND is_active = TRUE;
+                """,
+                (assignment_data.admin_id,)
+            )
+
+            admin = cur.fetchone()
+
+            if admin is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only active admins can reassign incidents"
+                )
+
+
+
+
+
+            cur.execute("""
+            SELECT assigned_technician_id, category
+            FROM incidents
+            WHERE id = %s
+            """,(incident_id,)
+            )
+            row = cur.fetchone()
+
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="incident nont found"
+                )
+
+            old_tech_id = row[0]
+            cat = row[1]
+
+            cur.execute("""
+            SELECT u.id
+            FROM users u
+            JOIN technician_skills ts ON
+            u.id = ts.technician_id
+            WHERE u.id = %s
+            AND u.role = 'TECHNICIAN'
+            AND u.is_active = 'TRUE'
+            AND ts.skill = %s           
+            """,(assignment_data.technician_id, cat)
+            )
+
+            row = cur.fetchone()
+
+            if row is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="invalid tech, tech must be active and from the same specialization as the cat" 
+                )
+
+            cur.execute(
+                """
+                UPDATE incidents
+                SET assigned_technician_id = %s
+                WHERE id = %s
+                RETURNING id, title, category, status, assigned_technician_id,
+                        response_deadline, resolution_deadline;
+                """,
+                (assignment_data.technician_id, incident_id)
+            )
+
+            updated_incident = cur.fetchone()
+
+            if updated_incident is None:
+                raise HTTPException(status_code=404, detail="Incident not found")
+
+            log_audit(
+                cur,
+                incident_id,
+                assignment_data.admin_id,
+                "TECHNICIAN_REASSIGNED",
+                str(old_tech_id) if old_tech_id is not None else None,
+                str(assignment_data.technician_id)
+            )
+
+            return {
+                "message": "Technician reassigned successfully",
+                "incident": {
+                    "id": updated_incident[0],
+                    "title": updated_incident[1],
+                    "category": updated_incident[2],
+                    "status": updated_incident[3],
+                    "assigned_technician_id": updated_incident[4],
+                    "response_deadline": updated_incident[5],
+                    "resolution_deadline": updated_incident[6]
+                }
+            }
+
