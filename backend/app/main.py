@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field
 from app.config import getConnection
 from typing import Literal
@@ -8,8 +9,16 @@ from app.services.load_based_assignment import load_based_assignment
 from app.services.int_tech_assignment import int_tech_assignment
 from app.services.audit_service import log_audit, getlogs
 from app.services.sla_service import calc_sla
+from app.services.sla_scheduler import stop_scheduler, start_scheduler
 
-app = FastAPI(title="ITSM SYSTEM")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    start_scheduler()
+    yield
+    stop_scheduler()
+
+
+app = FastAPI(lifespan=lifespan)
 
 class IncidentCreate(BaseModel):
     title:str
@@ -68,7 +77,7 @@ def get_inci():
             with con.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority, reported_by_user_id, assigned_technician_id,response_deadline, resolution_deadline
+                    SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority, reported_by_user_id, assigned_technician_id,response_deadline, resolution_deadline, acknowledged_at,resolved_at
                     FROM incidents 
   
                     """
@@ -91,7 +100,9 @@ def get_inci():
                     "reported_by_user_id":row[9],
                     "assigned_technician_id":row[10],
                     "response_deadline":row[11],
-                    "resolution_deadline": row[12]
+                    "resolution_deadline": row[12],
+                    "acknowledged_at" : row[13],
+                    "resolved_at": row[14]
                     
                 }
                 incidents.append(incident)
@@ -105,7 +116,7 @@ def get_incident_byid(incident_id: int):
                 with con.cursor() as cur:
                     cur.execute(
                         """
-                        SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id, response_deadline, resolution_deadline
+                        SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id, response_deadline, resolution_deadline, acknowledged_at,resolved_at
                         FROM incidents 
                         WHERE id = %s;
       
@@ -135,7 +146,9 @@ def get_incident_byid(incident_id: int):
                     "reported_by_user_id":row[9],
                     "assigned_technician_id":row[10],
                     "response_deadline":row[11],
-                    "resolution_deadline":row[12]
+                    "resolution_deadline":row[12],
+                    "acknowledged_at" : row[13],
+                    "resolved_at": row[14]
                 }
     return incident
         
@@ -241,7 +254,7 @@ def create_incident(incident_data:IncidentCreate):
                 UPDATE incidents
                 SET status = %s, assigned_technician_id = %s
                 WHERE id = %s
-                RETURNING id, title, description, category, status,estimated_complexity, business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id,response_deadline, resolution_deadline;
+                RETURNING id, title, description, category, status,estimated_complexity, business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id,response_deadline, resolution_deadline, acknowledged_at,resolved_at;
                 """, ("ASSIGNED", assigned_technician_id, row[0]))
            
 
@@ -274,7 +287,9 @@ def create_incident(incident_data:IncidentCreate):
             "reported_by_user_id":row[9],
             "assigned_technician_id":row[10],
             "response_deadline":row[11],
-            "resolution_deadline":row[12]
+            "resolution_deadline":row[12],
+            "acknowledged_at" : row[13],
+            "resolved_at": row[14]
         }
 
     return incident
@@ -316,14 +331,37 @@ def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
             cur.execute(
                 """
                 UPDATE incidents
-                SET status = %s
+                SET status = %s,
+
+                 acknowledged_at = CASE
+                    WHEN %s = 'ACKNOWLEDGED' AND acknowledged_at IS NULL
+                    THEN CURRENT_TIMESTAMP
+                    ELSE acknowledged_at
+                END,
+
+                resolved_at = CASE
+                    WHEN %s = 'RESOLVED' AND resolved_at IS NULL
+                    THEN CURRENT_TIMESTAMP
+                    ELSE resolved_at
+                END
+
                 WHERE id = %s
-                RETURNING id, title, description, category, status, estimated_complexity, business_criticality, affected_percentage, priority,reported_by_user_id,assigned_technician_id, response_deadline, resolution_deadline;
+
+                RETURNING id, title, description, category, status, estimated_complexity, business_criticality, affected_percentage, priority,reported_by_user_id,assigned_technician_id, response_deadline, resolution_deadline, acknowledged_at, resolved_at;
                 """,
-                (status_data.status, incident_id)
+                (status_data.status, status_data.status, status_data.status, incident_id)
             )
 
             row = cur.fetchone()
+
+            log_audit(
+                cur,
+                incident_id,
+                None,
+                "STATUS_CHANGED",
+                current_status,
+                status_data.status
+            )
  
             
 
@@ -340,7 +378,9 @@ def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
                 "reported_by_user_id":row[9],
                 "assigned_technician_id":row[10],
                 "response_deadline":row[11],
-                "resolution_deadline":row[12]
+                "resolution_deadline":row[12],
+                "acknowledged_at" : row[13],
+                "resolved_at": row[14]
             }
 
     return incident
@@ -558,7 +598,7 @@ def admin_assign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
                 SET assigned_technician_id = %s
                 WHERE id = %s
                 RETURNING id, title, category, status, assigned_technician_id,
-                        response_deadline, resolution_deadline;
+                        response_deadline, resolution_deadline, acknowledged_at,resolved_at
                 """,
                 (assignment_data.technician_id, incident_id)
             )
@@ -586,7 +626,9 @@ def admin_assign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
                     "status": updated_incident[3],
                     "assigned_technician_id": updated_incident[4],
                     "response_deadline": updated_incident[5],
-                    "resolution_deadline": updated_incident[6]
+                    "resolution_deadline": updated_incident[6],
+                    "acknowledged_at" : updated_incident[7],
+                    "resolved_at": updated_incident[8]
                 }
             }
 
