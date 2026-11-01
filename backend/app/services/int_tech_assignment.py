@@ -33,7 +33,7 @@ def int_tech_assignment(cur, incident_id, excluded_technician_id = None):
             WHERE u.role = 'TECHNICIAN'
                 AND u.is_active = TRUE
                 AND ts.skill = %s
-                AND (%s IS NULL OR u.id <> %s)
+                AND (%s::INTEGER IS NULL OR u.id <> %s)
         """,(row1[0],excluded_technician_id, excluded_technician_id)
     )
     row2 = cur.fetchall()
@@ -61,7 +61,7 @@ def int_tech_assignment(cur, incident_id, excluded_technician_id = None):
                 AND u.is_active = TRUE
                 AND ts.skill = %s
                 AND u.years_of_experience IS NOT NULL
-                AND (%s IS NULL OR u.id <> %s)
+                AND (%s::INTEGER IS NULL OR u.id <> %s)
                 ORDER BY u.years_of_experience DESC , u.id ASC
                 LIMIT 1;
                 """,(row1[0],excluded_technician_id, excluded_technician_id)
@@ -74,7 +74,7 @@ def int_tech_assignment(cur, incident_id, excluded_technician_id = None):
                     """
                     SELECT id FROM users
                     WHERE role = 'TECHNICIAN' AND is_active = TRUE
-                    AND (%s IS NULL OR id <> %s)
+                    AND (%s::INTEGER IS NULL OR id <> %s)
                     ORDER BY years_of_experience DESC NULLS LAST, id ASC
                     LIMIT 1;
                     """,(excluded_technician_id, excluded_technician_id)

@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field
 from app.config import getConnection
 from typing import Literal
-from datetime import datetime
+from datetime import datetime, timezone
 from app.services.priority_calc import priority_calc
 from app.services.load_based_assignment import load_based_assignment
 from app.services.int_tech_assignment import int_tech_assignment
@@ -163,7 +163,7 @@ def create_incident(incident_data:IncidentCreate):
     incident_data.estimated_complexity
     )
 
-    created_at = datetime.now()
+    created_at = datetime.now(timezone.utc)
 
     response_deadline, resolution_deadline = calc_sla(
         priority,

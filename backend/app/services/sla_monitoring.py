@@ -61,6 +61,14 @@ def check_sla_breaches():
                             "RESPONSE_SLA_BREACH",
                             f"Response SLA breached for incident #{incident_id}: {title}"
                         )
+                        log_audit(
+                            cur,
+                            incident_id,
+                            assigned_tech,
+                            "RESPONSE_SLA_BREACH_TECHNICIAN_NOTIFIED",
+                            None,
+                            None
+                        )
                 if response_breached:
                     log_audit(
                         cur,
@@ -70,14 +78,7 @@ def check_sla_breaches():
                         None,
                         None
                     )
-                    log_audit(
-                        cur,
-                        incident_id,
-                        assigned_tech,
-                        "RESPONSE_SLA_BREACH_TECHNICIAN_NOTIFIED",
-                        None,
-                        None
-                    )
+                    
                 
 
 
@@ -123,6 +124,15 @@ def check_sla_breaches():
                             "RESOLUTION_SLA_BREACH",
                             f"Resolution SLA breached for incident #{incident_id}: {title}"
                         )
+
+                        log_audit(
+                            cur,
+                            incident_id,
+                            assigned_tech,
+                            "RESOLUTION_SLA_BREACH_TECHNICIAN_NOTIFIED",
+                            None,
+                            None
+                        )
                 if resolution_breached:
                     log_audit(
                         cur,
@@ -132,14 +142,7 @@ def check_sla_breaches():
                         None,
                         None
                     )
-                    log_audit(
-                        cur,
-                        incident_id,
-                        assigned_tech,
-                        "RESOLUTION_SLA_BREACH_TECHNICIAN_NOTIFIED",
-                        None,
-                        None
-                    )
+                    
 
 def escalation_technician_reassignment():
 
@@ -362,11 +365,11 @@ def check_post_reassignment_acknowledgement():
 
             for incident_id, title, priority, assigned_tech, reassigned_at in incidents_to_check:
 
-                # Check whether the replacement technician's window has elapsed
+               
                 if current_time < reassigned_at + escalation_delays[priority]:
                     continue
 
-                # Notify admins
+               
                 for admin_id in admin_ids:
                     create_notification(
                         cur,
