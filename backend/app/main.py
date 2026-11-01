@@ -10,6 +10,7 @@ from app.services.int_tech_assignment import int_tech_assignment
 from app.services.audit_service import log_audit, getlogs
 from app.services.sla_service import calc_sla
 from app.services.sla_scheduler import stop_scheduler, start_scheduler
+from app.services.notification_service import create_notification
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -270,6 +271,13 @@ def create_incident(incident_data:IncidentCreate):
                     None,
                     str(assigned_technician_id)
                 )
+            create_notification(
+                cur,
+                assigned_technician_id,
+                incident_id,
+                "INCIDENT_ASSIGNED",
+                f"You have been assigned incident #{incident_id}: {row[1]}"
+            )
 
 
             
@@ -361,6 +369,15 @@ def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
                 "STATUS_CHANGED",
                 current_status,
                 status_data.status
+            )
+
+            create_notification(
+                cur,
+                row[9],  
+                incident_id,
+                "INCIDENT_STATUS_CHANGED",
+                f"Your incident #{incident_id} status has changed "
+                f"from {current_status} to {status_data.status}."
             )
  
             
@@ -528,7 +545,7 @@ def gelog(incident_id : int):
             return getlogs(cur, incident_id)
         
 @app.patch("/incidents/{incident_id}/assign")
-def admin_assign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
+def adminassign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
     with getConnection() as con:
         with con.cursor() as cur:
 
@@ -617,6 +634,22 @@ def admin_assign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
                 str(assignment_data.technician_id)
             )
 
+            create_notification(
+                cur,
+                assignment_data.technician_id,
+                incident_id,
+                "INCIDENT_REASSIGNED_BY_ADMIN",
+                f"You have been assigned incident #{incident_id}: {updated_incident[1]}"
+            )
+            if old_tech_id is not None:
+                create_notification(
+                    cur,
+                    old_tech_id,
+                    incident_id,
+                    "INCIDENT_REASSIGNED_BY_ADMIN",
+                    f"Your incident with the following details has been reassigned #{incident_id}: {updated_incident[1]}"
+                )
+
             return {
                 "message": "Technician reassigned successfully",
                 "incident": {
@@ -632,3 +665,89 @@ def admin_assign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
                 }
             }
 
+@app.get("/notifications")
+def getallnotifications():
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, incident_id, type, message, is_read, created_at
+                FROM notifications
+                """
+            )
+
+            rows = cur.fetchall()
+
+        notifications = []
+
+        for row in rows:
+            notif = {
+                "id": row[0],
+                "user_id": row[1],
+                "incident_id": row[2],
+                "type": row[3],
+                "message": row[4],
+                "is_read": row[5],
+                "created_at": row[6]
+            }
+
+            notifications.append(notif)
+
+        return notifications
+
+
+@app.get("/notifications/{user_id}")
+def getusernotifications(user_id : int):
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, incident_id, type, message, is_read, created_at
+                FROM notifications
+                WHERE user_id = %s
+                """,(user_id,)
+            )
+
+            rows = cur.fetchall()
+
+        notifications = []
+
+        for row in rows:
+            notif = {
+                "id": row[0],
+                "user_id": row[1],
+                "incident_id": row[2],
+                "type": row[3],
+                "message": row[4],
+                "is_read": row[5],
+                "created_at": row[6]
+            }
+
+            notifications.append(notif)
+
+        return notifications
+
+@app.patch("/notifications/{notification_id}/read")
+def readnotification(notification_id: int):
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute(
+            """
+            UPDATE notifications
+            SET is_read = TRUE
+            WHERE id = %s
+            RETURNING id, is_read;
+            """, (notification_id,)
+            )
+            row = cur.fetchone()
+
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="notification not found"
+                )
+        return {
+            "message": "Notification marked as read",
+            "id": row[0],
+            "is_read": row[1]
+        }
