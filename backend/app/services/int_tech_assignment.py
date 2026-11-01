@@ -7,7 +7,7 @@ minimum_scores = {
     "P4": 0
 }
 
-def int_tech_assignment(cur, incident_id):
+def int_tech_assignment(cur, incident_id, excluded_technician_id = None):
     cur.execute(
         """
         SELECT category, priority
@@ -33,7 +33,8 @@ def int_tech_assignment(cur, incident_id):
             WHERE u.role = 'TECHNICIAN'
                 AND u.is_active = TRUE
                 AND ts.skill = %s
-        """,(row1[0],)
+                AND (%s IS NULL OR u.id <> %s)
+        """,(row1[0],excluded_technician_id, excluded_technician_id)
     )
     row2 = cur.fetchall()
     eligible_techs = []
@@ -60,9 +61,10 @@ def int_tech_assignment(cur, incident_id):
                 AND u.is_active = TRUE
                 AND ts.skill = %s
                 AND u.years_of_experience IS NOT NULL
+                AND (%s IS NULL OR u.id <> %s)
                 ORDER BY u.years_of_experience DESC , u.id ASC
                 LIMIT 1;
-                """,(row1[0],)
+                """,(row1[0],excluded_technician_id, excluded_technician_id)
             )
     
             fallback_tech = cur.fetchone()
@@ -72,9 +74,10 @@ def int_tech_assignment(cur, incident_id):
                     """
                     SELECT id FROM users
                     WHERE role = 'TECHNICIAN' AND is_active = TRUE
+                    AND (%s IS NULL OR id <> %s)
                     ORDER BY years_of_experience DESC NULLS LAST, id ASC
                     LIMIT 1;
-                    """
+                    """,(excluded_technician_id, excluded_technician_id)
                 )
                 assigned_tech = cur.fetchone()
                 return assigned_tech[0] if assigned_tech else None
