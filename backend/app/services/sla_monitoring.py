@@ -228,6 +228,9 @@ def escalation_technician_reassignment():
                     RETURNING id;
                 """, (new_technician_id, incident_id))
 
+                if cur.fetchone() is None:
+                    continue
+
                 create_notification(
                     cur,
                     old_technician_id,

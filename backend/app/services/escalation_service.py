@@ -2,9 +2,9 @@ from datetime import timedelta
 
 
 escalation_delays = {
-    "P1": timedelta(minutes=15),
-    "P2": timedelta(minutes=30),
-    "P3": timedelta(minutes=120),
-    "P4": timedelta(minutes=240)
+    "P1": timedelta(minutes=5),
+    "P2": timedelta(minutes=15),
+    "P3": timedelta(minutes=60),
+    "P4": timedelta(minutes=120)
 }
 
