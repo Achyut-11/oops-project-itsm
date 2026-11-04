@@ -309,6 +309,7 @@ def create_incident(incident_data:IncidentCreate):
 def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
     with getConnection() as con:
         with con.cursor() as cur:
+            
 
             cur.execute(
                 """
@@ -329,6 +330,12 @@ def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
                 )
 
             current_status = row[4]
+
+            if status_data.status == "ACKNOWLEDGED":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Use the acknowledgement endpoint to acknowledge incidents"
+                )
 
             if(status_data.status not in allowed_transitions[current_status]):
                 raise HTTPException(
@@ -402,7 +409,76 @@ def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
 
     return incident
 
+@app.patch("/incidents/{incident_id}/acknowledge")
+def acknowledge(incident_id : int, technician_id: int):
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT i.status, i.assigned_technician_id, i.acknowledged_at, u.role
+                FROM incidents i
+                LEFT JOIN users u
+                ON i.assigned_technician_id = u.id
+                WHERE i.id = %s
+                """,(incident_id,)
+            )
 
+            row = cur.fetchone()
+
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Incident not found"
+                )
+
+            if row[1] != technician_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Unauthorized user"
+                )
+
+            if row[2] is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="incident has already been acknowledged"
+                )
+
+            if row[0] != "ASSIGNED":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Only incidents with ASSIGNED status can be acknowledged"
+                )
+
+            cur.execute(
+                """
+                UPDATE incidents
+                SET status = 'ACKNOWLEDGED',
+                    acknowledged_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                AND status = 'ASSIGNED'
+                AND  acknowledged_at IS NULL
+                RETURNING id, status, acknowledged_at, reported_by_user_id
+                """,(incident_id,)
+            )
+            updated_row = cur.fetchone()
+            log_audit(
+                cur,
+                incident_id,
+                technician_id,
+                "INCIDENT_ACKNOWLEDGED",
+                "ASSIGNED",
+                "ACKNOWLEDGED"
+            )
+            create_notification(cur, updated_row[3], incident_id, "INCIDENT_ACKNOWLEDGED", f"Your incident f{incident_id} has been acknowledged")
+            
+
+            return{
+                "id":updated_row[0],
+                "status":updated_row[1],
+                "acknowledged_at":updated_row[2]
+            }
+
+    
 
 @app.get("/users")
 def getallusers():

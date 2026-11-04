@@ -72,10 +72,16 @@ def int_tech_assignment(cur, incident_id, excluded_technician_id = None):
             if fallback_tech is None:
                 cur.execute(
                     """
-                    SELECT id FROM users
-                    WHERE role = 'TECHNICIAN' AND is_active = TRUE
-                    AND (%s::INTEGER IS NULL OR id <> %s)
-                    ORDER BY years_of_experience DESC NULLS LAST, id ASC
+                    SELECT u.id, COUNT(i.id) AS workload
+                    FROM users u
+                    LEFT JOIN incidents i
+                        ON u.id = i.assigned_technician_id
+                        AND i.status IN ('ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS')
+                    WHERE u.role = 'TECHNICIAN'
+                        AND u.is_active = TRUE
+                        AND (%s::INTEGER IS NULL OR u.id <> %s)
+                    GROUP BY u.id
+                    ORDER BY workload ASC, u.years_of_experience DESC NULLS LAST, u.id ASC
                     LIMIT 1;
                     """,(excluded_technician_id, excluded_technician_id)
                 )
