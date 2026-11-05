@@ -1,8 +1,8 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from contextlib import asynccontextmanager
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from app.config import getConnection
-from typing import Literal
+from typing import Literal, Annotated
 from datetime import datetime, timezone
 from app.services.priority_calc import priority_calc
 from app.services.load_based_assignment import load_based_assignment
@@ -11,6 +11,7 @@ from app.services.audit_service import log_audit, getlogs
 from app.services.sla_service import calc_sla
 from app.services.sla_scheduler import stop_scheduler, start_scheduler
 from app.services.notification_service import create_notification
+from datetime import date, timedelta
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -54,6 +55,25 @@ class IncidentAssignmentUpdate(BaseModel):
     technician_id: int
     admin_id: int
 
+class IncidentQuery(BaseModel):
+    status : Literal["NEW", "ASSIGNED", "ACKNOWLEDGED","IN_PROGRESS", "RESOLVED", "VERIFIED", "CLOSED"]|None =None
+    priority : Literal["P1","P2","P3","P4"]|None =None
+    category : str|None =None
+    assigned_technician_id : int|None =None
+    start_date : date|None =None
+    end_date: date | None = None
+    response_sla_breached: bool | None = None
+    resolution_sla_breached: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_dates(self):
+        if self.start_date is not None and self.end_date is not None:
+            if self.start_date > self.end_date:
+                raise ValueError("start_date cannot be after end_date")
+
+        return self
+
+
 
 allowed_transitions = {
     "NEW": ["ASSIGNED"],
@@ -73,16 +93,53 @@ def home():
 
 
 @app.get("/incidents")
-def get_inci():
+def get_incidents(incident_query:Annotated[IncidentQuery, Query()]):
     with getConnection() as con:  
             with con.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority, reported_by_user_id, assigned_technician_id,response_deadline, resolution_deadline, acknowledged_at,resolved_at
-                    FROM incidents 
-  
-                    """
-                )
+                query = """
+                        SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority, reported_by_user_id, assigned_technician_id,response_deadline, resolution_deadline, acknowledged_at,resolved_at,response_sla_breached,resolution_sla_breached
+                        FROM incidents
+                        WHERE TRUE
+    
+                        """
+                
+                params = []
+
+                if incident_query.status is not None:
+                    query += " AND status = %s"
+                    params.append(incident_query.status)
+
+                if incident_query.priority is not None:
+                    query += " AND priority = %s"
+                    params.append(incident_query.priority)
+
+                if incident_query.category is not None:
+                    query += " AND category = %s"
+                    params.append(incident_query.category)
+
+                if incident_query.assigned_technician_id is not None:
+                    query += " AND assigned_technician_id = %s"
+                    params.append(incident_query.assigned_technician_id)
+
+                if incident_query.start_date is not None:
+                    query += " AND created_at >= %s"
+                    params.append(incident_query.start_date)
+
+                if incident_query.end_date is not None:
+                    query += " AND created_at < %s"
+                    params.append(incident_query.end_date + timedelta(days=1))
+
+                if incident_query.response_sla_breached is not None:
+                    query += " AND response_sla_breached = %s"
+                    params.append(incident_query.response_sla_breached)
+
+                if incident_query.resolution_sla_breached is not None:
+                    query += " AND resolution_sla_breached = %s"
+                    params.append(incident_query.resolution_sla_breached)
+
+                query += " ORDER BY id ASC"
+                cur.execute(query, params)
+                
                 rows = cur.fetchall()
 
             incidents=[]
@@ -103,7 +160,9 @@ def get_inci():
                     "response_deadline":row[11],
                     "resolution_deadline": row[12],
                     "acknowledged_at" : row[13],
-                    "resolved_at": row[14]
+                    "resolved_at": row[14],
+                    "response_sla_breached" :row[15],
+                    "resolution_sla_breached" : row[16]
                     
                 }
                 incidents.append(incident)
@@ -461,6 +520,12 @@ def acknowledge(incident_id : int, technician_id: int):
                 """,(incident_id,)
             )
             updated_row = cur.fetchone()
+
+            if updated_row is None:
+                raise HTTPException(
+                    status_code= 409,
+                    detail="Incident could not be acknowledged because it was reassigned or already acknowledged. Please refresh and try again."
+                )
             log_audit(
                 cur,
                 incident_id,
@@ -469,7 +534,7 @@ def acknowledge(incident_id : int, technician_id: int):
                 "ASSIGNED",
                 "ACKNOWLEDGED"
             )
-            create_notification(cur, updated_row[3], incident_id, "INCIDENT_ACKNOWLEDGED", f"Your incident f{incident_id} has been acknowledged")
+            create_notification(cur, updated_row[3], incident_id, "INCIDENT_ACKNOWLEDGED", f"Your incident #{incident_id} has been acknowledged")
             
 
             return{
@@ -649,7 +714,7 @@ def adminassign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
 
 
             cur.execute("""
-            SELECT assigned_technician_id, category
+            SELECT assigned_technician_id, category, status, reported_by_user_id
             FROM incidents
             WHERE id = %s
             """,(incident_id,)
@@ -664,6 +729,8 @@ def adminassign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
 
             old_tech_id = row[0]
             cat = row[1]
+            old_status = row[2]
+            reported_by_user_id = row[3]
 
             cur.execute("""
             SELECT u.id
@@ -672,7 +739,7 @@ def adminassign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
             u.id = ts.technician_id
             WHERE u.id = %s
             AND u.role = 'TECHNICIAN'
-            AND u.is_active = 'TRUE'
+            AND u.is_active = TRUE
             AND ts.skill = %s           
             """,(assignment_data.technician_id, cat)
             )
@@ -688,7 +755,12 @@ def adminassign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
             cur.execute(
                 """
                 UPDATE incidents
-                SET assigned_technician_id = %s
+                SET assigned_technician_id = %s,
+                status = CASE
+                    WHEN status = 'ACKNOWLEDGED' THEN 'ASSIGNED'
+                    ELSE status
+                END,
+                acknowledged_at = NULL
                 WHERE id = %s
                 RETURNING id, title, category, status, assigned_technician_id,
                         response_deadline, resolution_deadline, acknowledged_at,resolved_at
@@ -700,6 +772,17 @@ def adminassign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
 
             if updated_incident is None:
                 raise HTTPException(status_code=404, detail="Incident not found")
+
+            if old_status == "ACKNOWLEDGED":
+                log_audit(
+                    cur,
+                    incident_id,
+                    assignment_data.admin_id,
+                    "STATUS_CHANGED",
+                    "ACKNOWLEDGED",
+                    "ASSIGNED"
+                )
+            
 
             log_audit(
                 cur,
@@ -716,6 +799,13 @@ def adminassign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
                 incident_id,
                 "INCIDENT_REASSIGNED_BY_ADMIN",
                 f"You have been assigned incident #{incident_id}: {updated_incident[1]}"
+            )
+            create_notification(
+                cur,
+                reported_by_user_id,
+                incident_id,
+                "INCIDENT_TECHNICIAN_CHANGED",
+                f"The technician handling your incident #{incident_id} has changed."
             )
             if old_tech_id is not None:
                 create_notification(
@@ -827,3 +917,73 @@ def readnotification(notification_id: int):
             "id": row[0],
             "is_read": row[1]
         }
+
+
+@app.get("/reports/overview")
+def report_overview():
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    COUNT(*),
+                    COUNT(*) FILTER (WHERE status NOT IN ('RESOLVED','VERIFIED','CLOSED')),
+                    COUNT(*) FILTER (WHERE priority = 'P1'),
+                    COUNT(*) FILTER (WHERE status IN ('RESOLVED','VERIFIED','CLOSED')),
+                    COUNT(*) FILTER (WHERE response_sla_breached OR resolution_sla_breached)
+                FROM incidents;
+            """)
+            r = cur.fetchone()
+    return {
+        "total": r[0],
+        "open": r[1],
+        "critical": r[2],
+        "resolved": r[3],
+        "sla_violations": r[4],
+    }
+
+@app.get("/reports/technician-workload")
+def report_technician_workload():
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute("""
+                SELECT u.id, u.name, COUNT(i.id) AS active_incidents
+                FROM users u
+                LEFT JOIN incidents i
+                    ON u.id = i.assigned_technician_id
+                    AND i.status IN ('ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS')
+                WHERE u.role = 'TECHNICIAN'
+                    AND u.is_active = TRUE
+                GROUP BY u.id, u.name
+                ORDER BY active_incidents DESC, u.id ASC;
+            """)
+            rows = cur.fetchall()
+
+    return [
+        {
+            "technician_id": row[0],
+            "name": row[1],
+            "active_incidents": row[2]
+        }
+        for row in rows
+    ]
+
+
+@app.get("/reports/service-analysis")
+def report_service_analysis():
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute("""
+                SELECT category, COUNT(*) AS incident_count
+                FROM incidents
+                GROUP BY category
+                ORDER BY incident_count DESC, category ASC;
+            """)
+            rows = cur.fetchall()
+
+    return [
+        {
+            "category": row[0],
+            "incident_count": row[1]
+        }
+        for row in rows
+    ]
