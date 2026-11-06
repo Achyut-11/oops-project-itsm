@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field, model_validator
 from app.config import getConnection
@@ -12,6 +12,8 @@ from app.services.sla_service import calc_sla
 from app.services.sla_scheduler import stop_scheduler, start_scheduler
 from app.services.notification_service import create_notification
 from datetime import date, timedelta
+from app.auth.security import hash_password, verify_password, create_access_token
+from app.auth.dependencies import get_current_user, require_employee, require_technician, require_admin
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -31,8 +33,6 @@ class IncidentCreate(BaseModel):
     business_criticality: Literal["LOW", "MEDIUM", "HIGH"]
     affected_percentage: float = Field(ge=0, le=100)
 
-    reported_by_user_id : int
-
 class IncidentStatusUpdate(BaseModel):
     status: Literal[
          "NEW",
@@ -47,13 +47,13 @@ class IncidentStatusUpdate(BaseModel):
 class UserCreate(BaseModel):
     name:str
     email:str
-    role: Literal["EMPLOYEE", "TECHNICIAN", "ADMIN"]
+    role: Literal["TECHNICIAN", "ADMIN"]
     years_of_experience: int
-    skills: list[str] = []
+    skills: list[str] = Field(default_factory=list)
+    password: str = Field(min_length=8)
 
 class IncidentAssignmentUpdate(BaseModel):
     technician_id: int
-    admin_id: int
 
 class IncidentQuery(BaseModel):
     status : Literal["NEW", "ASSIGNED", "ACKNOWLEDGED","IN_PROGRESS", "RESOLVED", "VERIFIED", "CLOSED"]|None =None
@@ -73,7 +73,24 @@ class IncidentQuery(BaseModel):
 
         return self
 
+class UserRegister(BaseModel):
+    name: str
+    email: str
+    password: str = Field(min_length=8)
 
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+class AdminSetup(BaseModel):
+    name: str
+    email: str
+    password: str = Field(min_length=8)
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8)
 
 allowed_transitions = {
     "NEW": ["ASSIGNED"],
@@ -93,7 +110,7 @@ def home():
 
 
 @app.get("/incidents")
-def get_incidents(incident_query:Annotated[IncidentQuery, Query()]):
+def get_incidents(incident_query:Annotated[IncidentQuery, Query()],  current_user: dict = Depends(get_current_user)):
     with getConnection() as con:  
             with con.cursor() as cur:
                 query = """
@@ -104,6 +121,14 @@ def get_incidents(incident_query:Annotated[IncidentQuery, Query()]):
                         """
                 
                 params = []
+                if current_user["role"] == "EMPLOYEE":
+                    query += " AND reported_by_user_id = %s"
+                    params.append(current_user["id"])
+
+                elif current_user["role"] == "TECHNICIAN":
+                    query += " AND assigned_technician_id = %s"
+                    params.append(current_user["id"])
+
 
                 if incident_query.status is not None:
                     query += " AND status = %s"
@@ -170,19 +195,47 @@ def get_incidents(incident_query:Annotated[IncidentQuery, Query()]):
     return{"incidents" : incidents}
 
 @app.get("/incidents/{incident_id}")
-def get_incident_byid(incident_id: int):
+def get_incident_byid(incident_id: int, current_user: dict = Depends(get_current_user)):
 
     with getConnection() as con:  
                 with con.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id, response_deadline, resolution_deadline, acknowledged_at,resolved_at
-                        FROM incidents 
-                        WHERE id = %s;
-      
-                        """,
-                        (incident_id,)
-                    )
+                    if current_user["role"] == "ADMIN":
+                        cur.execute(
+                            """
+                            SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, priority,reported_by_user_id, assigned_technician_id, response_deadline, resolution_deadline, acknowledged_at,resolved_at
+                            FROM incidents 
+                            WHERE id = %s;
+        
+                            """,
+                            (incident_id,)
+                        )
+                    elif current_user["role"] == "TECHNICIAN":
+                        cur.execute(
+                            """
+                            SELECT id, title, description, category, status,
+                                estimated_complexity, business_criticality,
+                                affected_percentage, priority, reported_by_user_id,
+                                assigned_technician_id, response_deadline,
+                                resolution_deadline, acknowledged_at, resolved_at
+                            FROM incidents
+                            WHERE id = %s AND assigned_technician_id = %s
+                            """,
+                            (incident_id, current_user["id"])
+                        )
+
+                    else:  # EMPLOYEE
+                        cur.execute(
+                            """
+                            SELECT id, title, description, category, status,
+                                estimated_complexity, business_criticality,
+                                affected_percentage, priority, reported_by_user_id,
+                                assigned_technician_id, response_deadline,
+                                resolution_deadline, acknowledged_at, resolved_at
+                            FROM incidents
+                            WHERE id = %s AND reported_by_user_id = %s
+                            """,
+                            (incident_id, current_user["id"])
+                        )
                     row = cur.fetchone()
 
 
@@ -214,7 +267,7 @@ def get_incident_byid(incident_id: int):
         
 
 @app.post("/incidents")
-def create_incident(incident_data:IncidentCreate):
+def create_incident(incident_data:IncidentCreate, current_user:dict = Depends(require_employee)):
 
     priority = priority_calc(
     incident_data.affected_percentage,
@@ -233,33 +286,7 @@ def create_incident(incident_data:IncidentCreate):
 
     with getConnection() as con:
         with con.cursor() as cur:
-            
-            cur.execute(
-                """
-                SELECT id, role 
-                FROM users
-                WHERE id =%s
-                """,
-                (incident_data.reported_by_user_id,)
-            )
-            row = cur.fetchone()
-            print("1. User fetched")
-            if row is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail="User not found"
-                )
-
-            if row[1] != "EMPLOYEE":
-                raise HTTPException(
-                    status_code=400,
-                    detail="Only employees can report incidents"
-                )
-
-
-
-
-
+               
             cur.execute(
                 """
                 INSERT INTO incidents (title, description, category, estimated_complexity, business_criticality, affected_percentage, priority,reported_by_user_id, response_deadline, resolution_deadline)
@@ -274,7 +301,7 @@ def create_incident(incident_data:IncidentCreate):
                     incident_data.business_criticality,
                     incident_data.affected_percentage,
                     priority,
-                    incident_data.reported_by_user_id,
+                    current_user["id"],
                     response_deadline, 
                     resolution_deadline
                     
@@ -290,7 +317,7 @@ def create_incident(incident_data:IncidentCreate):
             log_audit(
             cur,
             incident_id,
-            incident_data.reported_by_user_id,
+            current_user["id"],
             "INCIDENT_CREATED",
             None,
             "NEW"
@@ -365,22 +392,34 @@ def create_incident(incident_data:IncidentCreate):
 
 
 @app.patch("/incidents/{incident_id}")
-def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
+def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate, current_user: dict = Depends(get_current_user)):
     with getConnection() as con:
         with con.cursor() as cur:
             
 
             cur.execute(
                 """
-                SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage
+                SELECT id, title, description, category, status, estimated_complexity,business_criticality,affected_percentage, assigned_technician_id
                 FROM incidents
                 WHERE id = %s
                 """,
                 (incident_id, )
             )
 
-
             row = cur.fetchone()
+
+            if current_user["role"] == "TECHNICIAN":
+                if current_user["id"] != row[8]:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="You can only update incidents assigned to you"
+                    )
+            if current_user["role"] == "EMPLOYEE":
+            
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only technicians and admins can update incidents"
+                )
             
             if row is None:
                 raise HTTPException(
@@ -431,7 +470,7 @@ def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
             log_audit(
                 cur,
                 incident_id,
-                None,
+                current_user["id"],
                 "STATUS_CHANGED",
                 current_status,
                 status_data.status
@@ -469,16 +508,14 @@ def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate):
     return incident
 
 @app.patch("/incidents/{incident_id}/acknowledge")
-def acknowledge(incident_id : int, technician_id: int):
+def acknowledge(incident_id : int,  current_user: dict = Depends(require_technician)):
     with getConnection() as con:
         with con.cursor() as cur:
             cur.execute(
                 """
-                SELECT i.status, i.assigned_technician_id, i.acknowledged_at, u.role
-                FROM incidents i
-                LEFT JOIN users u
-                ON i.assigned_technician_id = u.id
-                WHERE i.id = %s
+                SELECT status, assigned_technician_id, acknowledged_at
+                FROM incidents
+                WHERE id = %s
                 """,(incident_id,)
             )
 
@@ -490,7 +527,7 @@ def acknowledge(incident_id : int, technician_id: int):
                     detail="Incident not found"
                 )
 
-            if row[1] != technician_id:
+            if row[1] !=current_user["id"]:
                 raise HTTPException(
                     status_code=403,
                     detail="Unauthorized user"
@@ -529,7 +566,7 @@ def acknowledge(incident_id : int, technician_id: int):
             log_audit(
                 cur,
                 incident_id,
-                technician_id,
+                current_user["id"],
                 "INCIDENT_ACKNOWLEDGED",
                 "ASSIGNED",
                 "ACKNOWLEDGED"
@@ -543,10 +580,121 @@ def acknowledge(incident_id : int, technician_id: int):
                 "acknowledged_at":updated_row[2]
             }
 
-    
+@app.post("/users")
+def adduser(
+    userinfo: UserCreate,
+    current_user: dict = Depends(require_admin)
+):
+    hashed_password = hash_password(userinfo.password)
+
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users
+                    (name, email, role, years_of_experience, password_hash)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id, name, email, role, is_active,
+                          created_at, years_of_experience;
+                """,
+                (
+                    userinfo.name,
+                    userinfo.email,
+                    userinfo.role,
+                    userinfo.years_of_experience,
+                    hashed_password
+                )
+            )
+
+            row = cur.fetchone()
+            user_id = row[0]
+
+            if userinfo.role == "TECHNICIAN":
+                for skill in userinfo.skills:
+                    cur.execute(
+                        """
+                        INSERT INTO technician_skills (technician_id, skill)
+                        VALUES (%s, %s)
+                        """,
+                        (user_id, skill)
+                    )
+
+            cur.execute(
+                """
+                SELECT skill
+                FROM technician_skills
+                WHERE technician_id = %s
+                """,
+                (user_id,)
+            )
+            skills = [skill_row[0] for skill_row in cur.fetchall()]
+
+    return {
+        "id": row[0],
+        "name": row[1],
+        "email": row[2],
+        "role": row[3],
+        "is_active": row[4],
+        "created_at": row[5],
+        "years_of_experience": row[6],
+        "skills": skills
+    }
+@app.post("/auth/setup_admin")
+def setup_admin(admin_data: AdminSetup):
+    with getConnection() as con:
+        with con.cursor() as cur:
+
+            cur.execute("SELECT pg_advisory_xact_lock(123456789)")
+
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM users
+                    WHERE role = 'ADMIN'
+                )
+                """
+            )
+
+            admin_exists = cur.fetchone()[0]
+
+            if admin_exists:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Admin setup has already been completed"
+                )
+
+            hashed_password = hash_password(admin_data.password)
+
+            cur.execute(
+                """
+                INSERT INTO users
+                    (name, email, role, years_of_experience,
+                     password_hash, is_active)
+                VALUES (%s, %s, 'ADMIN', 0, %s, TRUE)
+                RETURNING id, name, email, role
+                """,
+                (
+                    admin_data.name,
+                    admin_data.email,
+                    hashed_password
+                )
+            )
+
+            row = cur.fetchone()
+
+    return {
+        "message": "Initial admin created successfully",
+        "user": {
+            "id": row[0],
+            "name": row[1],
+            "email": row[2],
+            "role": row[3]
+        }
+    }
+
 
 @app.get("/users")
-def getallusers():
+def getallusers(current_user : dict = Depends(require_admin)):
     with getConnection() as con:
         with con.cursor() as cur:
             cur.execute(
@@ -582,7 +730,14 @@ def getallusers():
     return people
 
 @app.get("/users/{user_id}")
-def getoneuser(user_id):
+def getoneuser(user_id:int, current_user : dict = Depends(get_current_user)):
+
+    if current_user["role"]!="ADMIN" and current_user["id"]!=user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="User Information can only be viewed by admins and the user themselves"
+        )
+    
     with getConnection() as con:
         with con.cursor() as cur:
             cur.execute(
@@ -623,95 +778,16 @@ def getoneuser(user_id):
 
     return person
 
-@app.post("/users")
-def adduser(userinfo: UserCreate):
-    with getConnection() as con:
-        with con.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO users (name, email, role, years_of_experience)
-                VALUES (%s,%s,%s, %s)
-                RETURNING id, name, email, role, is_active, created_at, years_of_experience;
-                """,(
-
-                    userinfo.name,
-                    userinfo.email,
-                    userinfo.role,
-                    userinfo.years_of_experience
-
-                ) 
-            )
-            row = cur.fetchone()
-
-            user_id = row[0]
-
-            if(userinfo.role == "TECHNICIAN"):
-                for skill in userinfo.skills:
-                    cur.execute(
-                        """
-                        INSERT INTO technician_skills (technician_id, skill)
-                        VALUES (%s, %s)
-                        """,(
-                            user_id, skill
-                        )
-                    )
-
-            cur.execute(
-                            """
-                            SELECT skill
-                            FROM technician_skills
-                            WHERE technician_id = %s
-                            """,(user_id,)
-                        )
-            skills = [row[0] for row in cur.fetchall()]
-
-    person = {
-        "id" : row[0],
-        "name" : row[1],
-        "email" : row[2],
-        "role" : row[3],
-        "is_active" : row[4],
-        "created_at" : row[5],
-        "years_of_experience" : row[6],
-        "skills": skills
-    }
-        
-
-    return person
-
 @app.get("/incidents/{incident_id}/audit")
-def gelog(incident_id : int):
+def gelog(incident_id : int, current_user : dict = Depends(require_admin)):
     with getConnection() as con:
         with con.cursor() as cur:
             return getlogs(cur, incident_id)
         
 @app.patch("/incidents/{incident_id}/assign")
-def adminassign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
+def admin_assign(incident_id:int, assignment_data:IncidentAssignmentUpdate, current_user : dict = Depends(require_admin)):
     with getConnection() as con:
         with con.cursor() as cur:
-
-            cur.execute(
-                """
-                SELECT id
-                FROM users
-                WHERE id = %s
-                    AND role = 'ADMIN'
-                    AND is_active = TRUE;
-                """,
-                (assignment_data.admin_id,)
-            )
-
-            admin = cur.fetchone()
-
-            if admin is None:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Only active admins can reassign incidents"
-                )
-
-
-
-
 
             cur.execute("""
             SELECT assigned_technician_id, category, status, reported_by_user_id
@@ -724,7 +800,19 @@ def adminassign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
             if row is None:
                 raise HTTPException(
                     status_code=404,
-                    detail="incident nont found"
+                    detail="incident not found"
+                )
+            
+            if old_status not in ("ASSIGNED", "ACKNOWLEDGED"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot reassign an incident in {old_status} status"
+                )
+
+            if assignment_data.technician_id == old_tech_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Incident is already assigned to this technician"
                 )
 
             old_tech_id = row[0]
@@ -756,11 +844,12 @@ def adminassign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
                 """
                 UPDATE incidents
                 SET assigned_technician_id = %s,
-                status = CASE
-                    WHEN status = 'ACKNOWLEDGED' THEN 'ASSIGNED'
-                    ELSE status
-                END,
-                acknowledged_at = NULL
+                status = 'ASSIGNED'
+                acknowledged_at = NULL,
+                auto_reassigned = TRUE,
+                reassigned_at = CURRENT_TIMESTAMP,
+                escalation_admin_notified = FALSE
+
                 WHERE id = %s
                 RETURNING id, title, category, status, assigned_technician_id,
                         response_deadline, resolution_deadline, acknowledged_at,resolved_at
@@ -777,7 +866,7 @@ def adminassign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
                 log_audit(
                     cur,
                     incident_id,
-                    assignment_data.admin_id,
+                    current_user["id"],
                     "STATUS_CHANGED",
                     "ACKNOWLEDGED",
                     "ASSIGNED"
@@ -787,7 +876,7 @@ def adminassign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
             log_audit(
                 cur,
                 incident_id,
-                assignment_data.admin_id,
+                current_user["id"],
                 "TECHNICIAN_REASSIGNED",
                 str(old_tech_id) if old_tech_id is not None else None,
                 str(assignment_data.technician_id)
@@ -832,7 +921,7 @@ def adminassign(incident_id:int, assignment_data:IncidentAssignmentUpdate):
             }
 
 @app.get("/notifications")
-def getallnotifications():
+def getallnotifications(current_user : dict = Depends(require_admin)):
     with getConnection() as con:
         with con.cursor() as cur:
             cur.execute(
@@ -862,8 +951,9 @@ def getallnotifications():
         return notifications
 
 
-@app.get("/notifications/{user_id}")
-def getusernotifications(user_id : int):
+@app.get("/notifications/me")
+def getusernotifications(current_user : dict = Depends(get_current_user)):
+
     with getConnection() as con:
         with con.cursor() as cur:
             cur.execute(
@@ -871,7 +961,7 @@ def getusernotifications(user_id : int):
                 SELECT id, user_id, incident_id, type, message, is_read, created_at
                 FROM notifications
                 WHERE user_id = %s
-                """,(user_id,)
+                """,(current_user["id"],)
             )
 
             rows = cur.fetchall()
@@ -894,17 +984,27 @@ def getusernotifications(user_id : int):
         return notifications
 
 @app.patch("/notifications/{notification_id}/read")
-def readnotification(notification_id: int):
+def readnotification(notification_id: int, current_user : dict = Depends(get_current_user)):
     with getConnection() as con:
         with con.cursor() as cur:
-            cur.execute(
-            """
-            UPDATE notifications
-            SET is_read = TRUE
-            WHERE id = %s
-            RETURNING id, is_read;
-            """, (notification_id,)
-            )
+            if current_user["role"] == "ADMIN":
+                cur.execute(
+                    """
+                    SELECT user_id FROM notifications
+                    WHERE id = %s AND is_read IS FALSE
+                    """,
+                    (notification_id,)
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT user_id FROM notifications
+                    WHERE id = %s
+                    AND user_id = %s
+                    AND is_read IS FALSE
+                    """,
+                    (notification_id, current_user["id"])
+                )
             row = cur.fetchone()
 
             if row is None:
@@ -912,6 +1012,33 @@ def readnotification(notification_id: int):
                     status_code=404,
                     detail="notification not found"
                 )
+            
+            if current_user["role"] == "ADMIN":
+                cur.execute(
+                    """
+                    UPDATE notifications
+                    SET is_read = TRUE
+                    WHERE id = %s AND is_read IS FALSE
+                    RETURNING id, is_read, user_id
+                    """,
+                    (notification_id,)
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE notifications
+                    SET is_read = TRUE
+                    WHERE id = %s
+                    AND user_id = %s
+                    AND is_read IS FALSE
+                    RETURNING id, is_read, user_id
+                    """,
+                    (notification_id, current_user["id"])
+                )
+
+            row = cur.fetchone()
+
+            
         return {
             "message": "Notification marked as read",
             "id": row[0],
@@ -920,7 +1047,7 @@ def readnotification(notification_id: int):
 
 
 @app.get("/reports/overview")
-def report_overview():
+def report_overview(current_user : dict = Depends(require_admin)):
     with getConnection() as con:
         with con.cursor() as cur:
             cur.execute("""
@@ -942,7 +1069,7 @@ def report_overview():
     }
 
 @app.get("/reports/technician-workload")
-def report_technician_workload():
+def report_technician_workload(current_user : dict = Depends(require_admin)):
     with getConnection() as con:
         with con.cursor() as cur:
             cur.execute("""
@@ -969,7 +1096,7 @@ def report_technician_workload():
 
 
 @app.get("/reports/service-analysis")
-def report_service_analysis():
+def report_service_analysis(current_user : dict = Depends(require_admin)):
     with getConnection() as con:
         with con.cursor() as cur:
             cur.execute("""
@@ -987,3 +1114,126 @@ def report_service_analysis():
         }
         for row in rows
     ]
+
+@app.post("/auth/register")
+def register_user(user: UserRegister):
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT email FROM users
+                WHERE email = %s
+                """,(user.email,)
+            )
+
+            row = cur.fetchone()
+
+            if row is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="email already registered"
+                )
+            
+            hashed_password = hash_password(user.password)
+            cur.execute(
+                            """
+                            INSERT INTO users (name, email, role, password_hash)
+                            VALUES (%s, %s, 'EMPLOYEE', %s)
+                            RETURNING id, name, email, role
+                            """,
+                            (user.name, user.email, hashed_password)
+                        )
+
+            row = cur.fetchone()
+
+        return {
+            "id": row[0],
+            "name": row[1],
+            "email": row[2],
+            "role": row[3],
+            "message": "Registration successful"
+        }
+
+
+@app.post("/auth/login")
+def login(user: UserLogin):
+    with getConnection() as con:
+        with con.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT id, name, email, role, password_hash, token_version
+                FROM users
+                WHERE email = %s
+                """,
+                (user.email,)
+            )
+
+            row = cur.fetchone()
+
+            if row is None:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid email or password"
+                )
+
+            if not verify_password(user.password, row[4]):
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid email or password"
+                )
+
+            access_token = create_access_token({
+                "token_version": row[5],
+                "user_id": row[0],
+                "role": row[3]
+            })
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": row[0],
+            "name": row[1],
+            "email": row[2],
+            "role": row[3]
+        }
+    }
+
+@app.patch("/auth/change-password")
+def change_password(
+    password_data: PasswordChange,
+    current_user: dict = Depends(get_current_user)
+):
+    with getConnection() as con:
+        with con.cursor() as cur:
+            cur.execute(
+                """
+                SELECT password_hash
+                FROM users
+                WHERE id = %s
+                """,
+                (current_user["id"],)
+            )
+
+            row = cur.fetchone()
+
+            if row is None or not verify_password(password_data.current_password, row[0]):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Current password is incorrect"
+                )
+
+            new_hash = hash_password(password_data.new_password)
+
+            cur.execute(
+                """
+                UPDATE users
+                SET password_hash = %s,
+                token_version = token_version+1
+                WHERE id = %s
+                """,
+                (new_hash, current_user["id"])
+            )
+
+    return {"message": "Password changed successfully"}
