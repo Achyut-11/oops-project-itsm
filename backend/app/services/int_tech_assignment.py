@@ -62,7 +62,13 @@ def int_tech_assignment(cur, incident_id, excluded_technician_id = None):
                 AND ts.skill = %s
                 AND u.years_of_experience IS NOT NULL
                 AND (%s::INTEGER IS NULL OR u.id <> %s)
-                ORDER BY u.years_of_experience DESC , u.id ASC
+                ORDER BY u.years_of_experience DESC ,
+                    (
+                        SELECT COUNT(*)
+                        FROM incidents i
+                        WHERE i.assigned_technician_id = u.id
+                        AND i.status IN ('ASSIGNED', 'IN_PROGRESS')
+                    ) ASC, u.id ASC
                 LIMIT 1;
                 """,(row1[0],excluded_technician_id, excluded_technician_id)
             )

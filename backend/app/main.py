@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from app.services.priority_calc import priority_calc
 from app.services.load_based_assignment import load_based_assignment
 from app.services.int_tech_assignment import int_tech_assignment
-from app.services.audit_service import log_audit, getlogs
+from app.services.audit_service import log_audit, getlogs, getlogsnonincident
 from app.services.sla_service import calc_sla
 from app.services.sla_scheduler import stop_scheduler, start_scheduler
 from app.services.notification_service import create_notification
@@ -17,6 +17,7 @@ from app.auth.dependencies import get_current_user, require_employee, require_te
 from fastapi.responses import JSONResponse
 from app.repositories.incident_repo import IncidentRepository
 from app.repositories.user_repo import UserRepository
+from app.repositories.sla_repo import SLARepository
 from app.exceptions import (
     ITSMError, Conflict, ValidationError, NoTechnicianAvailable,
     Forbidden, Unauthorized
@@ -49,12 +50,9 @@ class IncidentCreate(BaseModel):
 class IncidentStatusUpdate(BaseModel):
     status: Literal[
          "NEW",
-         "CLASSIFIED",
          "ASSIGNED",
-         "ACKNOWLEDGED",
          "IN_PROGRESS",
          "RESOLVED",
-         "VERIFIED",
          "CLOSED"
         ]
 class UserCreate(BaseModel):
@@ -105,6 +103,10 @@ class PasswordChange(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8)
 
+class SLAPolicyUpdate(BaseModel):
+    response_minutes: int = Field(gt=0)
+    resolution_minutes: int = Field(gt=0)
+
 @app.get("/")
 def home():
      return{"message" : "backen is running"}
@@ -134,7 +136,7 @@ def create_incident(incident_data: IncidentCreate,
         incident_data.estimated_complexity,
     )
     created_at = datetime.now(timezone.utc)
-    response_deadline, resolution_deadline = calc_sla(priority, created_at)
+    response_deadline, resolution_deadline = calc_sla(cur, priority, created_at)
 
     with getConnection() as con:
         with con.cursor() as cur:
@@ -210,6 +212,66 @@ def acknowledge(incident_id: int, current_user: dict = Depends(require_technicia
                 "status": updated.status,
                 "acknowledged_at": updated.acknowledged_at,
             }
+
+@app.patch("/incidents/{incident_id}/close")
+def close(incident_id: int, current_user: dict = Depends(require_admin)):
+    with getConnection() as con:
+        with con.cursor() as cur:
+            repo = IncidentRepository(cur)
+
+            incident = repo.get_by_id(incident_id)
+            incident.ensure_can_be_closed_by(current_user)
+
+            updated = repo.mark_closed(incident_id)
+            if updated is None:
+                raise Conflict(
+                    "Incident was already closed"
+                )
+
+            log_audit(cur, incident_id, current_user["id"],
+                      "INCIDENT_CLOSED", "RESOLVED", "CLOSED")
+            create_notification(cur, updated.reported_by_user_id, incident_id,
+                                "INCIDENT_CLOSED",
+                                f"Your incident #{incident_id} has been closed")
+
+            create_notification(cur, updated.assigned_technician_id, incident_id,
+                                "INCIDENT_CLOSED",
+                                f"Your incident #{incident_id} has been closed")
+
+            return {
+                "id": updated.id,
+                "status": updated.status,
+                "closed_at": updated.closed_at,
+            }
+
+@app.patch("/incidents/{incident_id}/resolve")
+def resolve(incident_id: int, current_user: dict = Depends(require_technician)):
+    with getConnection() as con:
+        with con.cursor() as cur:
+            repo = IncidentRepository(cur)
+
+            incident = repo.get_by_id(incident_id)
+            incident.ensure_can_be_resolved_by(current_user)
+
+            updated = repo.mark_resolved(incident_id)
+            if updated is None:
+                raise Conflict(
+                    "Incident was already resolved"
+                )
+
+            log_audit(cur, incident_id, current_user["id"],
+                      "INCIDENT_RESOLVED", "IN_PROGRESS", "RESOLVED")
+            create_notification(cur, updated.reported_by_user_id, incident_id,
+                                "INCIDENT_RESOLVED",
+                                f"Your incident #{incident_id} has been resolved")
+
+            return {
+                "id": updated.id,
+                "status": updated.status,
+                "resolved_at": updated.resolved_at,
+            }
+
+
 @app.post("/users")
 def adduser(userinfo: UserCreate, current_user: dict = Depends(require_admin)):
     with getConnection() as con:
@@ -259,10 +321,19 @@ def getoneuser(user_id: int, current_user: dict = Depends(get_current_user)):
             user = UserRepository(cur).get_by_id(user_id)
     return user.to_dict()
 @app.get("/incidents/{incident_id}/audit")
+
 def gelog(incident_id : int, current_user : dict = Depends(require_admin)):
     with getConnection() as con:
         with con.cursor() as cur:
             return getlogs(cur, incident_id)
+
+@app.get("/incidents/audit/non_incident")
+def gelognonincident(current_user : dict = Depends(require_admin)):
+    with getConnection() as con:
+        with con.cursor() as cur:
+            return getlogsnonincident(cur)
+
+        
         
 @app.patch("/incidents/{incident_id}/assign")
 def admin_assign(incident_id: int, assignment_data: IncidentAssignmentUpdate,
@@ -411,3 +482,64 @@ def change_password(password_data: PasswordChange,
                 current_user["id"], hash_password(password_data.new_password)
             )
     return {"message": "Password changed successfully"}
+
+@app.get("/admin/sla-policies")
+def get_sla_policies(
+    current_user: dict = Depends(require_admin)
+):
+    with getConnection() as conn:
+        with conn.cursor() as cur:
+            repo = SLARepository(cur)
+            policies = repo.get_all()
+
+            return [
+                {
+                    "priority": row[0],
+                    "response_minutes": row[1],
+                    "resolution_minutes": row[2],
+                    "updated_at": row[3],
+                    "updated_by": row[4]
+                }
+                for row in policies
+            ]
+
+
+@app.put("/admin/sla-policies/{priority}")
+def update_sla_policy(
+    priority: Literal["P1", "P2", "P3", "P4"],
+    data: SLAPolicyUpdate,
+    current_user: dict = Depends(require_admin)
+):
+    with getConnection() as conn:
+        with conn.cursor() as cur:
+            repo = SLARepository(cur)
+
+            old_policy, new_policy = repo.update(
+                priority,
+                data.response_minutes,
+                data.resolution_minutes,
+                current_user["id"]
+            )
+
+            if new_policy is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="SLA policy not found"
+                )
+
+            log_audit(cur, None, current_user["id"],
+                "SLA_POLICY_CHANGED",
+                (f"{old_policy[0]}: response={old_policy[1]} min, resolution={old_policy[2]} min"),
+                (f"{new_policy[0]}: response={new_policy[1]} min, resolution={new_policy[2]} min"))
+
+            return {
+                "message": f"{priority} SLA policy updated",
+                "priority":  new_policy[0],
+                "response_minutes":  new_policy[1],
+                "resolution_minutes":  new_policy[2],
+                "updated_at": new_policy[3],
+                "updated_by": new_policy[4]
+            }
+
+            
+

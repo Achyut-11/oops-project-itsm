@@ -1,27 +1,17 @@
-from datetime import datetime, timedelta
+from app.repositories.sla_repo import SLARepository
+from datetime import timedelta
 
-sla_rules = {
-    "P1": {
-        "response": timedelta(minutes=15),
-        "resolution": timedelta(hours=4)
-    },
-    "P2": {
-        "response": timedelta(minutes=30),
-        "resolution": timedelta(hours=8)
-    },
-    "P3": {
-        "response": timedelta(hours=2),
-        "resolution": timedelta(hours=24)
-    },
-    "P4": {
-        "response": timedelta(hours=4),
-        "resolution": timedelta(hours=48)
-    }
-}
+def calc_sla(cur, priority: str, created_at):
+    repo = SLARepository(cur)
+    policy = repo.get_by_priority(priority)
 
-def calc_sla(priority: str, craeted_at: datetime):
-    rules = sla_rules[priority]
-    response_deadline = craeted_at + rules["response"]
-    resolution_deadline = craeted_at + rules["resolution"]
+    if policy is None:
+        raise ValueError(f"No SLA policy configured for {priority}")
+
+    response_minutes = policy[1]
+    resolution_minutes = policy[2]
+
+    response_deadline = created_at + timedelta(minutes=response_minutes)
+    resolution_deadline = created_at + timedelta(minutes=resolution_minutes)
 
     return response_deadline, resolution_deadline

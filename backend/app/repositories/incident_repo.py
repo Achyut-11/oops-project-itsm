@@ -102,11 +102,11 @@ class IncidentRepository:
         return Incident.from_row(self._cur.fetchone())
 
     def mark_acknowledged(self, incident_id: int) -> Incident | None:
-        """None means the state changed underneath us."""
+      
         self._cur.execute(
             f"""
             UPDATE incidents
-            SET status = 'ACKNOWLEDGED', acknowledged_at = CURRENT_TIMESTAMP
+            SET status = 'IN_PROGRESS', acknowledged_at = CURRENT_TIMESTAMP
             WHERE id = %s
               AND status = 'ASSIGNED'
               AND acknowledged_at IS NULL
@@ -116,6 +116,38 @@ class IncidentRepository:
         )
         row = self._cur.fetchone()
         return Incident.from_row(row) if row else None
+
+    def mark_resolved(self, incident_id: int) -> Incident | None:
+            
+            self._cur.execute(
+                f"""
+                UPDATE incidents
+                SET status = 'RESOLVED', resolved_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                  AND status = 'IN_PROGRESS'
+                  AND resolved_at IS NULL
+                RETURNING {Incident.COLUMNS}
+                """,
+                (incident_id,),
+            )
+            row = self._cur.fetchone()
+            return Incident.from_row(row) if row else None
+
+    def mark_closed(self, incident_id: int) -> Incident | None:
+                
+                self._cur.execute(
+                    f"""
+                    UPDATE incidents
+                    SET status = 'CLOSED', closed_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                      AND status = 'RESOLVED'
+                      AND closed_at IS NULL
+                    RETURNING {Incident.COLUMNS}
+                    """,
+                    (incident_id,),
+                )
+                row = self._cur.fetchone()
+                return Incident.from_row(row) if row else None
 
     def update_status(self, incident_id: int, new_status: str) -> Incident:
         self._cur.execute(
@@ -144,7 +176,7 @@ class IncidentRepository:
                 reassigned_at = CURRENT_TIMESTAMP,
                 escalation_admin_notified = FALSE
             WHERE id = %s
-              AND status IN ('ASSIGNED', 'ACKNOWLEDGED')
+              AND status 'ASSIGNED'
             RETURNING {Incident.COLUMNS}
             """,
             (technician_id, incident_id),

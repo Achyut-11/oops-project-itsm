@@ -6,10 +6,10 @@ class ReportRepository:
         self._cur.execute("""
             SELECT
                 COUNT(*),
-                COUNT(*) FILTER (WHERE status NOT IN ('RESOLVED','VERIFIED','CLOSED')),
+                COUNT(*) FILTER (WHERE status NOT IN ('RESOLVED', 'CLOSED')),
                 COUNT(*) FILTER (WHERE priority = 'P1'),
 
-                COUNT(*) FILTER (WHERE status IN ('RESOLVED','VERIFIED','CLOSED')),
+                COUNT(*) FILTER (WHERE status IN ('RESOLVED', 'CLOSED')),
                 COUNT(*) FILTER (WHERE response_sla_breached OR resolution_sla_breached)
             FROM incidents;
         """)
@@ -24,8 +24,8 @@ class ReportRepository:
 
             LEFT JOIN incidents i
                 ON u.id = i.assigned_technician_id
-                
-                AND i.status IN ('ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS')
+
+                AND i.status IN ('ASSIGNED','IN_PROGRESS')
             WHERE u.role = 'TECHNICIAN' AND u.is_active = TRUE
             GROUP BY u.id, u.name
             ORDER BY active_incidents DESC, u.id ASC;
