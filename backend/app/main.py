@@ -67,7 +67,7 @@ class IncidentAssignmentUpdate(BaseModel):
     technician_id: int
 
 class IncidentQuery(BaseModel):
-    status : Literal["NEW", "ASSIGNED", "ACKNOWLEDGED","IN_PROGRESS", "RESOLVED", "VERIFIED", "CLOSED"]|None =None
+    status : Literal["NEW", "ASSIGNED","IN_PROGRESS", "RESOLVED", "CLOSED"]|None =None
     priority : Literal["P1","P2","P3","P4"]|None =None
     category : str|None =None
     assigned_technician_id : int|None =None
@@ -135,11 +135,12 @@ def create_incident(incident_data: IncidentCreate,
         incident_data.business_criticality,
         incident_data.estimated_complexity,
     )
-    created_at = datetime.now(timezone.utc)
-    response_deadline, resolution_deadline = calc_sla(cur, priority, created_at)
+    
 
     with getConnection() as con:
         with con.cursor() as cur:
+            created_at = datetime.now(timezone.utc)
+            response_deadline, resolution_deadline = calc_sla(cur, priority, created_at)
             repo = IncidentRepository(cur)
 
             incident = repo.create(incident_data, current_user["id"], priority,
@@ -159,32 +160,6 @@ def create_incident(incident_data: IncidentCreate,
                                 f"You have been assigned incident #{incident.id}: {assigned.title}")
 
             return assigned.to_dict()
-
-@app.patch("/incidents/{incident_id}")
-def update_incident_status(incident_id: int, status_data: IncidentStatusUpdate,
-                           current_user: dict = Depends(get_current_user)):
-    with getConnection() as con:
-        with con.cursor() as cur:
-            repo = IncidentRepository(cur)
-
-            incident = repo.get_by_id(incident_id)
-            old_status = incident.status
-            incident.ensure_can_move_to(status_data.status, current_user)
-
-            updated = repo.update_status(incident_id, status_data.status)
-
-            log_audit(cur, incident_id, current_user["id"],
-                      "STATUS_CHANGED", old_status, status_data.status)
-
-            if updated.reported_by_user_id != current_user["id"]:
-                create_notification(
-                    cur, updated.reported_by_user_id, incident_id,
-                    "INCIDENT_STATUS_CHANGED",
-                    f"Your incident #{incident_id} status has changed "
-                    f"from {old_status} to {status_data.status}."
-                )
-
-            return updated.to_dict()
 
 @app.patch("/incidents/{incident_id}/acknowledge")
 def acknowledge(incident_id: int, current_user: dict = Depends(require_technician)):

@@ -176,7 +176,7 @@ class IncidentRepository:
                 reassigned_at = CURRENT_TIMESTAMP,
                 escalation_admin_notified = FALSE
             WHERE id = %s
-              AND status 'ASSIGNED'
+              AND status = 'ASSIGNED'
             RETURNING {Incident.COLUMNS}
             """,
             (technician_id, incident_id),
